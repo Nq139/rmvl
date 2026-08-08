@@ -3,6 +3,17 @@ set(cur_path "${CMAKE_CURRENT_SOURCE_DIR}")
 file(GLOB module_main_st RELATIVE "${cur_path}" "${cur_path}/*")
 
 set(RMVL_MAIN_MODULE "")
+# `log` depends on `core`, while `io` depends on `log`.  Add this part of the
+# dependency chain explicitly because the remaining directories are added in
+# alphabetical order.
+foreach(m core log)
+  if(IS_DIRECTORY ${cur_path}/${m})
+    add_subdirectory(${cur_path}/${m})
+    list(APPEND RMVL_MAIN_MODULE "${m}")
+    list(REMOVE_ITEM module_main_st "${m}")
+  endif()
+endforeach()
+
 foreach(m ${module_main_st})
   if(IS_DIRECTORY ${cur_path}/${m})
     add_subdirectory(${cur_path}/${m})

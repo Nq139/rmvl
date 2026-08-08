@@ -35,6 +35,8 @@ devel
 # 日志数据类文件
 log
 Camera
+!modules/log/
+!modules/log/**
 
 # 自动生成的文件
 _rm_codegen_*

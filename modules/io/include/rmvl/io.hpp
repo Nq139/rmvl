@@ -35,6 +35,7 @@
 #include "io/util.hpp"
 
 #include "io/ipc.hpp"
+#include "io/log.hpp"
 #include "io/netapp.hpp"
 #include "io/serial.hpp"
 #include "io/socket.hpp"

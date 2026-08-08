@@ -4,7 +4,7 @@
 rmvl_generate_para(io)
 
 rmvl_add_module(io
-  DEPENDS core
+  DEPENDS log
   EXTERNAL json fmt
 )
 

@@ -14,6 +14,7 @@
 #include <gtest/gtest.h>
 
 #include "rmvl/io/async.hpp"
+#include "rmvl/io/log.hpp"
 #include "rmvl/io/socket.hpp"
 
 using namespace rm;
@@ -56,6 +57,25 @@ TEST(IO_socket, sync_tcp_socket) {
 
     accept_thrd.join();
     connect_thrd.join();
+}
+
+TEST(IO_log, socket_sink_uses_connected_stream_socket) {
+    constexpr uint16_t port = 10810;
+    Acceptor acceptor(Endpoint(ip::tcp::v4(), port));
+    Connector connector(Endpoint(ip::tcp::v4(), port), "127.0.0.1");
+    const LogRecord record{std::chrono::system_clock::from_time_t(0), LogLevel::Info, "socket log"};
+
+    auto accept_thread = std::thread([&]() {
+        auto socket = acceptor.accept();
+        EXPECT_EQ(socket.read(), formatLogRecord(record));
+    });
+    auto connect_thread = std::thread([&]() {
+        auto socket = connector.connect();
+        SocketSink sink(socket);
+        EXPECT_TRUE(sink.write(record));
+    });
+    accept_thread.join();
+    connect_thread.join();
 }
 
 TEST(IO_socket, sync_tcp_socket_nonblocking) {
