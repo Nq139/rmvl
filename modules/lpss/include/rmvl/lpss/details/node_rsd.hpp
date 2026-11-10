@@ -33,11 +33,30 @@ struct RNDPMessage {
 
     Guid guid{};                     //!< 节点唯一标识符
     uint8_t ndp_version{2};          //!< NDP 协议版本
-    uint8_t edp_version{1};          //!< EDP 协议版本
+    uint8_t edp_version{2};          //!< EDP 协议版本
     uint8_t mtp_version{2};          //!< MTP 协议版本
     uint8_t heartbeat_timeout{};     //!< 心跳周期（单位：s）
     std::vector<Locator> locators{}; //!< REDP 控制消息的单播定位器列表
     std::string name{};              //!< 节点名称
+};
+
+//! REDP 快照中的一个端点；端口为 0 表示 Writer
+struct REDPEndpoint {
+    Guid guid{};
+    uint16_t port{};
+    std::string topic{};
+    std::string msgtype{};
+};
+
+//! REDP: magic(4) + source(8) + SYN(2) + ACK(1) + count(2) + Snapshot[]
+struct REDPMessage {
+    Guid source{};
+    uint16_t syn{};
+    bool ack{};
+    std::vector<REDPEndpoint> snapshot{};
+
+    std::string serialize() const;
+    static std::optional<REDPMessage> deserialize(std::string_view data) noexcept;
 };
 
 //! 不兼容的协议版本为 0
@@ -46,50 +65,60 @@ struct NegotiatedProtocols {
 };
 
 NegotiatedProtocols negotiateProtocols(const RNDPMessage &peer) noexcept;
+bool sameREDPEndpoint(const REDPEndpoint &a, const REDPEndpoint &b) noexcept;
+bool snapshotBelongsToPeer(Guid peer, const std::vector<REDPEndpoint> &snapshot) noexcept;
 
-//! REDP 通信端点发现消息
-struct REDPMessage {
-    //! 序列化 REDP 消息
-    std::string serialize() const noexcept;
+uint16_t initialREDPSyn();
+bool countREDPEndpointSize(size_t &total, std::string_view topic, std::string_view type) noexcept;
 
-    //! 反序列化 REDP 消息
-    static REDPMessage deserialize(const char *data) noexcept;
+//! 每个 Peer 独立停等，端点变化合并为最新状态，丢 ACK 时重发同一报文
+class REDPSender {
+public:
+    REDPSender(Guid local, Guid peer) : _local(local), _peer(peer), _next(initialREDPSyn()) {}
+    void markDirty() noexcept { _dirty = true; }
+    std::optional<REDPMessage> request(const std::vector<REDPEndpoint> &snapshot);
+    bool confirm(const REDPMessage &ack, const std::vector<REDPEndpoint> &snapshot);
 
-    //! 创建添加读取端点消息
-    static inline REDPMessage addReader(const Guid &g, std::string_view topic, uint16_t port, std::string_view msgtype) noexcept {
-        return {Action::Add, Type::Reader, g, port, std::string(topic), std::string(msgtype)};
-    }
+    bool waiting() const noexcept { return _pending.has_value(); }
+    bool dirty() const noexcept { return _dirty; }
 
-    //! 创建添加写入端点消息
-    static inline REDPMessage addWriter(const Guid &g, std::string_view topic, std::string_view msgtype) noexcept {
-        return {Action::Add, Type::Writer, g, {}, std::string(topic), std::string(msgtype)};
-    }
-
-    //! 创建移除读取端点消息
-    static inline REDPMessage removeReader(const Guid &g, std::string_view topic) noexcept {
-        return {Action::Remove, Type::Reader, g, {}, std::string(topic)};
-    }
-
-    //! 创建移除写入端点消息
-    static inline REDPMessage removeWriter(const Guid &g, std::string_view topic) noexcept {
-        return {Action::Remove, Type::Writer, g, {}, std::string(topic)};
-    }
-
-    enum class Action : uint8_t {
-        Remove = 0b00, //!< 端点移除
-        Add = 0b01     //!< 端点更新
-    } action{};        //!< 端点动作
-
-    enum class Type : uint8_t {
-        Reader = 0b00, //!< 数据读取端点
-        Writer = 0b10  //!< 数据写入端点
-    } type{};          //!< 端点类型
-
-    Guid endpoint_guid{};  //!< 端点所属实体 GUID
-    uint16_t port{};       //!< 监听端口
-    std::string topic{};   //!< 话题名称
-    std::string msgtype{}; //!< 消息类型
+private:
+    Guid _local{}, _peer{};
+    uint16_t _next{};
+    std::optional<REDPMessage> _pending{};
+    bool _dirty{};
 };
+
+//! 接收已解码校验的 REDP 报文；乱序、冲突重复报文均拒绝
+class REDPReceiver {
+public:
+    struct Result {
+        bool applied{};
+        REDPMessage ack{};
+    };
+    explicit REDPReceiver(Guid peer) : _peer(peer) {}
+    std::optional<Result> accept(const REDPMessage &request, Guid local);
+    const std::vector<REDPEndpoint> &snapshot() const noexcept { return _snapshot; }
+
+private:
+    Guid _peer{};
+    bool _initialized{};
+    uint16_t _last_syn{};
+    std::vector<REDPEndpoint> _snapshot{};
+};
+
+//! REDP Peer 会话状态
+struct REDPPeer {
+    Locator locator{};
+    REDPSender sender;
+    REDPReceiver receiver;
+    bool online{true};
+
+    REDPPeer(Guid local, Guid peer, Locator loc)
+        : locator(loc), sender(local, peer), receiver(peer) {}
+};
+
+bool sendREDPMessage(DgramSocket &socket, Locator locator, const REDPMessage &message);
 
 //! 节点存储信息
 struct NodeStorageInfo {
@@ -104,8 +133,6 @@ struct DiscoveredReaderStorageInfo {
     std::unordered_map<Guid, Locator, GuidHash> readers; //!< 相关的端点 GUID 与定位器映射表 [Guid: Locator]
     std::string msgtype;                                 //!< 消息类型
 };
-
-void sendREDPMessage(Locator loc, const REDPMessage &msg);
 
 Locator selectBestLocator(std::array<uint8_t, 4> target_ip, const RNDPMessage &rndp_msg);
 
