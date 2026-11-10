@@ -61,41 +61,42 @@ rm::async::Task<> Node::rndp_multicast(std::vector<ip::Networkv4> networks, std:
 
 rm::async::Task<> Node::rndp_listener(rm::async::DgramSocket rndp_reader) {
     while (_running) {
-        // 接收原始 UDP 报文
+        // 接收并校验 RNDP 公告
         auto [data, addr_str, port] = co_await rndp_reader.read();
+        auto announcement = RNDPMessage::deserialize(data);
+        if (!announcement || announcement->guid == _uid)
+            continue;
+        std::array<uint8_t, 4> source_ip{};
+        if (inet_pton(AF_INET, addr_str.c_str(), source_ip.data()) != 1)
+            continue;
+        const auto locator = selectBestLocator(source_ip, *announcement);
+        if (locator.invalid())
+            continue;
+        const auto selected = negotiateProtocols(*announcement);
 
-        if (data.size() < RNDP_HEADER_SIZE)
-            continue;
-        // 解析的 RNDP 消息
-        auto rndp_msg = RNDPMessage::deserialize(const_cast<const char *>(data.data()));
-        if (rndp_msg.guid == _uid)
-            continue;
-        // 处理发现的节点信息
         bool is_new_node{};
-        auto [it, inserted] = _discovered_nodes.try_emplace(rndp_msg.guid, NodeStorageInfo{rndp_msg});
-        if (inserted)
-            is_new_node = true;
-        else
+        {
+            auto [it, inserted] = _discovered_nodes.try_emplace(announcement->guid);
+            is_new_node = inserted;
+            it->second.rndp_msg = *announcement;
             it->second.last_alive = std::chrono::steady_clock::now();
-
-        if (is_new_node) {
-            std::array<uint8_t, 4> addr{};
-            inet_pton(AF_INET, addr_str.c_str(), addr.data());
-            // 选择最佳控制平面定位器
-            auto ctrl_loc = selectBestLocator(addr, rndp_msg);
-            std::vector<REDPMessage> redp_msgs{};
-            redp_msgs.reserve(_local_writers.size() + _local_readers.size());
-            if (!ctrl_loc.invalid()) {
-                _discovered_nodes[rndp_msg.guid].ctrl_loc = ctrl_loc;
-                for (const auto &[topic, writer] : _local_writers)
-                    redp_msgs.push_back(REDPMessage::addWriter(writer->guid(), topic, writer->msgtype()));
-                for (const auto &[topic, reader] : _local_readers)
-                    redp_msgs.push_back(REDPMessage::addReader(reader->guid(), topic, reader->port(), reader->msgtype()));
-            }
-            // 向新发现的节点单播包含所有本地 Writers/Readers 的 REDP 消息
-            for (const auto &msg : redp_msgs)
-                sendREDPMessage(ctrl_loc, msg);
+            it->second.ctrl_loc = locator;
+            it->second.selected = selected;
         }
+        if (!is_new_node || selected.edp != 1)
+            continue;
+
+        // 向新发现的节点同步本地端点
+        std::vector<REDPMessage> messages{};
+        {
+            messages.reserve(_local_writers.size() + _local_readers.size());
+            for (const auto &[topic, writer] : _local_writers)
+                messages.push_back(REDPMessage::addWriter(writer->guid(), topic, writer->msgtype()));
+            for (const auto &[topic, reader] : _local_readers)
+                messages.push_back(REDPMessage::addReader(reader->guid(), topic, reader->port(), reader->msgtype()));
+        }
+        for (const auto &message : messages)
+            sendREDPMessage(locator, message);
     }
 }
 

@@ -16,6 +16,13 @@
 
 #ifdef _WIN32
 #include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#endif
+
+#ifdef _WIN32
+#include <winsock2.h>
 #else
 #include <arpa/inet.h>
 #endif
@@ -425,5 +432,69 @@ TEST(LPSS_node, async_timer_cancel) {
 }
 
 #endif
+
+TEST(LPSS_rsd2, rndp_version_field_and_bounds) {
+    lpss::RNDPMessage packet{};
+    packet.guid = lpss::Guid{0x1234567800010000ULL};
+    packet.heartbeat_timeout = 5;
+    packet.locators = {{7850, {127, 0, 0, 1}}};
+    packet.name = "rndp-version";
+    auto wire = packet.serialize();
+    ASSERT_GE(wire.size(), 18u);
+    EXPECT_EQ(wire.substr(0, 4), "ND02");
+    EXPECT_EQ(wire.substr(12, 4), std::string("\x76\x02\x01\x02", 4));
+    auto decoded = lpss::RNDPMessage::deserialize(wire);
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded->guid, packet.guid);
+    ASSERT_EQ(decoded->locators.size(), 1u);
+    EXPECT_EQ(decoded->locators.front().port, 7850);
+    EXPECT_EQ(decoded->name, packet.name);
+    auto obsolete = wire;
+    obsolete.replace(0, 4, "ND01");
+    EXPECT_FALSE(lpss::RNDPMessage::deserialize(obsolete));
+    auto wrong_version = wire;
+    wrong_version[14] = 0;
+    const auto lower_edp = lpss::RNDPMessage::deserialize(wrong_version);
+    ASSERT_TRUE(lower_edp.has_value());
+    EXPECT_EQ(lpss::negotiateProtocols(*lower_edp).edp, 0);
+    EXPECT_EQ(lpss::negotiateProtocols(*lower_edp).mtp, 2);
+    auto future_versions = wire;
+    future_versions[14] = 3;
+    future_versions[15] = 4;
+    const auto future = lpss::RNDPMessage::deserialize(future_versions);
+    ASSERT_TRUE(future.has_value());
+    EXPECT_EQ(future->edp_version, 3);
+    EXPECT_EQ(future->mtp_version, 4);
+    const auto selection = lpss::negotiateProtocols(*future);
+    EXPECT_EQ(selection.edp, 1);
+    EXPECT_EQ(selection.mtp, 2);
+    EXPECT_EQ(future->serialize(), future_versions);
+
+    auto edp_incompatible = *future;
+    edp_incompatible.edp_version = 0;
+    const auto only_mtp = lpss::negotiateProtocols(edp_incompatible);
+    EXPECT_EQ(only_mtp.edp, 0);
+    EXPECT_EQ(only_mtp.mtp, 2);
+    auto mtp_incompatible = *future;
+    mtp_incompatible.mtp_version = 1;
+    const auto only_edp = lpss::negotiateProtocols(mtp_incompatible);
+    EXPECT_EQ(only_edp.edp, 1);
+    EXPECT_EQ(only_edp.mtp, 0);
+    auto future_ndp = wire;
+    future_ndp[13] = 3;
+    EXPECT_FALSE(lpss::RNDPMessage::deserialize(future_ndp));
+
+    wrong_version = wire;
+    wrong_version[12] = 'x';
+    EXPECT_FALSE(lpss::RNDPMessage::deserialize(wrong_version));
+    EXPECT_FALSE(lpss::RNDPMessage::deserialize(wire.substr(0, wire.size() - 1)));
+
+    auto oversized = packet;
+    oversized.locators.resize(256);
+    EXPECT_TRUE(oversized.serialize().empty());
+    oversized = packet;
+    oversized.name.assign(256, 'x');
+    EXPECT_TRUE(oversized.serialize().empty());
+}
 
 } // namespace rm_test

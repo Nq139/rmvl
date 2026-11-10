@@ -44,48 +44,70 @@ Locator read_locator(const char *data) noexcept {
 
 } // namespace
 
-std::string RNDPMessage::serialize() const noexcept {
-    const uint8_t num = static_cast<uint8_t>(locators.size());
-    const size_t msg_size = RNDP_HEADER_SIZE + num * LOCATOR_WIRE_SIZE + 1 + name.length();
-    std::string rndp_msg(msg_size, '\0');
-
-    // RNDP 头部
-    strcpy(rndp_msg.data(), "ND01");
-    ::memcpy(rndp_msg.data() + 4, &guid.full, sizeof(guid.full));
-    ::memcpy(rndp_msg.data() + 4 + sizeof(guid.full), &num, sizeof(num));
-    ::memcpy(rndp_msg.data() + 4 + sizeof(guid.full) + 1, &heartbeat_timeout, sizeof(heartbeat_timeout));
-
-    // RNDP 数据
-    auto p_locator = rndp_msg.data() + RNDP_HEADER_SIZE;
-    for (const auto &loc : locators) {
-        write_locator(p_locator, loc);
-        p_locator += LOCATOR_WIRE_SIZE;
-    }
-
-    uint8_t name_size = static_cast<uint8_t>(name.length());
-    ::memcpy(rndp_msg.data() + RNDP_HEADER_SIZE + num * LOCATOR_WIRE_SIZE, &name_size, sizeof(name_size));
-    ::memcpy(rndp_msg.data() + RNDP_HEADER_SIZE + num * LOCATOR_WIRE_SIZE + 1, name.data(), name_size);
-
-    return rndp_msg;
+NegotiatedProtocols negotiateProtocols(const RNDPMessage &peer) noexcept {
+    if (peer.ndp_version != 2)
+        return {};
+    // EDP 和 MTP 分别协商，当前使用 EDP 版本 1 和 MTP 版本 2
+    return {static_cast<uint8_t>(peer.edp_version >= 1 ? 1 : 0),
+            static_cast<uint8_t>(peer.mtp_version >= 2 ? 2 : 0)};
 }
 
-RNDPMessage RNDPMessage::deserialize(const char *data) noexcept {
-    RNDPMessage res;
-    if (std::string_view(data, 4) != "ND01")
-        return res;
-    ::memcpy(&res.guid.full, data + 4, sizeof(res.guid.full));
-    uint8_t num{};
-    ::memcpy(&num, data + 4 + sizeof(res.guid.full), sizeof(num));
-    ::memcpy(&res.heartbeat_timeout, data + 4 + sizeof(res.guid.full) + sizeof(num), sizeof(res.heartbeat_timeout));
-    res.locators.reserve(num);
+std::string RNDPMessage::serialize() const noexcept {
+    if (locators.size() > UINT8_MAX || name.size() > UINT8_MAX)
+        return {};
+    constexpr size_t header_size = RNDP_HEADER_SIZE + 4;
+    const auto num = static_cast<uint8_t>(locators.size());
+    const auto name_size = static_cast<uint8_t>(name.size());
+    std::string wire(header_size + num * LOCATOR_WIRE_SIZE + 1 + name_size, '\0');
+    // RNDP 头部
+    ::memcpy(wire.data(), "ND02", 4);
+    ::memcpy(wire.data() + 4, &guid.full, sizeof(guid.full));
+    wire[12] = 'v';
+    wire[13] = static_cast<char>(ndp_version);
+    wire[14] = static_cast<char>(edp_version);
+    wire[15] = static_cast<char>(mtp_version);
+    wire[16] = static_cast<char>(num);
+    wire[17] = static_cast<char>(heartbeat_timeout);
 
-    for (size_t i = 0; i < num; ++i)
-        res.locators.emplace_back(read_locator(data + RNDP_HEADER_SIZE + i * LOCATOR_WIRE_SIZE));
+    // RNDP 数据
+    size_t offset = header_size;
+    for (const auto &locator : locators) {
+        write_locator(wire.data() + offset, locator);
+        offset += LOCATOR_WIRE_SIZE;
+    }
+    wire[offset++] = static_cast<char>(name_size);
+    ::memcpy(wire.data() + offset, name.data(), name_size);
+    return wire;
+}
 
-    uint8_t name_size{};
-    ::memcpy(&name_size, data + RNDP_HEADER_SIZE + num * LOCATOR_WIRE_SIZE, sizeof(name_size));
-    res.name = std::string(data + RNDP_HEADER_SIZE + num * LOCATOR_WIRE_SIZE + 1, name_size);
-    return res;
+std::optional<RNDPMessage> RNDPMessage::deserialize(std::string_view wire) noexcept {
+    constexpr size_t header_size = RNDP_HEADER_SIZE + 4;
+    if (wire.size() < header_size + 1 || wire.substr(0, 4) != "ND02" ||
+        wire[12] != 'v' || static_cast<uint8_t>(wire[13]) != 2)
+        return std::nullopt;
+    const auto count = static_cast<uint8_t>(wire[16]);
+    const size_t name_pos = header_size + size_t(count) * LOCATOR_WIRE_SIZE;
+    if (name_pos >= wire.size())
+        return std::nullopt;
+    const auto name_len = static_cast<uint8_t>(wire[name_pos]);
+    if (name_pos + 1 + name_len != wire.size())
+        return std::nullopt;
+
+    RNDPMessage result{};
+    ::memcpy(&result.guid.full, wire.data() + 4, 8);
+    if (!result.guid.full)
+        return std::nullopt;
+    result.ndp_version = static_cast<uint8_t>(wire[13]);
+    result.edp_version = static_cast<uint8_t>(wire[14]);
+    result.mtp_version = static_cast<uint8_t>(wire[15]);
+    result.heartbeat_timeout = static_cast<uint8_t>(wire[17]);
+    if (!result.heartbeat_timeout)
+        return std::nullopt;
+    result.locators.reserve(count);
+    for (size_t i = 0; i < count; ++i)
+        result.locators.emplace_back(read_locator(wire.data() + header_size + i * LOCATOR_WIRE_SIZE));
+    result.name.assign(wire.data() + name_pos + 1, name_len);
+    return result;
 }
 
 std::string REDPMessage::serialize() const noexcept {

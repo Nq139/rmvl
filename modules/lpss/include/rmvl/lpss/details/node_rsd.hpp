@@ -12,6 +12,7 @@
 #pragma once
 
 #include <chrono>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -28,13 +29,23 @@ struct RNDPMessage {
     std::string serialize() const noexcept;
 
     //! 反序列化 RNDP 消息
-    static RNDPMessage deserialize(const char *data) noexcept;
+    static std::optional<RNDPMessage> deserialize(std::string_view data) noexcept;
 
     Guid guid{};                     //!< 节点唯一标识符
+    uint8_t ndp_version{2};          //!< NDP 协议版本
+    uint8_t edp_version{1};          //!< EDP 协议版本
+    uint8_t mtp_version{2};          //!< MTP 协议版本
     uint8_t heartbeat_timeout{};     //!< 心跳周期（单位：s）
-    std::vector<Locator> locators{}; //!< 用于 REDP 的单播定位器列表
+    std::vector<Locator> locators{}; //!< REDP 控制消息的单播定位器列表
     std::string name{};              //!< 节点名称
 };
+
+//! 不兼容的协议版本为 0
+struct NegotiatedProtocols {
+    uint8_t edp{}, mtp{};
+};
+
+NegotiatedProtocols negotiateProtocols(const RNDPMessage &peer) noexcept;
 
 //! REDP 通信端点发现消息
 struct REDPMessage {
@@ -85,6 +96,7 @@ struct NodeStorageInfo {
     RNDPMessage rndp_msg{};                                          //!< RNDP 消息
     std::chrono::time_point<std::chrono::steady_clock> last_alive{}; //!< 上次收到该节点消息的时间戳
     Locator ctrl_loc{};                                              //!< 与该节点通信的最佳控制平面定位器
+    NegotiatedProtocols selected{};                                  //!< 与此节点实际选择的 EDP/MTP 版本
 };
 
 //! 发现的订阅者端点存储信息
